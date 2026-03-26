@@ -1,0 +1,228 @@
+name: Build pydantic-core Android Wheels
+
+# Trigger manually or on push/tag
+on:
+  workflow_dispatch:
+    inputs:
+      pydantic_core_version:
+        description: "pydantic-core version tag (e.g. v2.18.4)"
+        required: true
+        default: "v2.18.4"
+      python_version:
+        description: "Python version to target (e.g. 3.12 or 3.13)"
+        required: true
+        default: "3.13"
+      android_api:
+        description: "Android API level (min 24)"
+        required: true
+        default: "24"
+  push:
+    tags:
+      - "android-pydantic-core-*"
+
+env:
+  # Keep these in sync with your Termux Python build
+  PYDANTIC_CORE_VERSION: ${{ github.event.inputs.pydantic_core_version || 'v2.18.4' }}
+  PYTHON_VERSION:        ${{ github.event.inputs.python_version        || '3.12'    }}
+  ANDROID_API:           ${{ github.event.inputs.android_api           || '24'      }}
+  # NDK version - r26d is stable and well-tested for Rust cross-compile
+  NDK_VERSION: r26d
+  CARGO_NDK_VERSION: "3.5.4"
+  MATURIN_VERSION: "1.7.0"
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # Build matrix: one job per Android ABI
+  # aarch64  → Galaxy A14 5G (your device), all modern Android
+  # armv7    → 32-bit ARM fallback (older devices)
+  # x86_64   → emulators / ChromeOS
+  # ─────────────────────────────────────────────────────────────
+  build:
+    name: "${{ matrix.abi }} (API ${{ github.event.inputs.android_api || '24' }})"
+    runs-on: ubuntu-22.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: aarch64
+            rust_target: aarch64-linux-android
+            termux_arch: aarch64
+          - abi: armv7
+            rust_target: armv7-linux-androideabi
+            termux_arch: arm
+          - abi: x86_64
+            rust_target: x86_64-linux-android
+            termux_arch: x86_64
+
+    steps:
+      # ── 1. Checkout this repo (contains the workflow + any patches) ──
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Clone pydantic-core at the requested version ──
+      - name: Clone pydantic-core ${{ env.PYDANTIC_CORE_VERSION }}
+        run: |
+          git clone --depth 1 \
+            --branch ${{ env.PYDANTIC_CORE_VERSION }} \
+            https://github.com/pydantic/pydantic-core.git
+          echo "PYDANTIC_CORE_DIR=$GITHUB_WORKSPACE/pydantic-core" >> $GITHUB_ENV
+
+      # ── 3. Set up host Python (needed by maturin) ──
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # ── 4. Cache Rust toolchain + Cargo registry ──
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            pydantic-core/target
+          key: cargo-android-${{ matrix.rust_target }}-${{ env.PYDANTIC_CORE_VERSION }}-${{ hashFiles('pydantic-core/Cargo.lock') }}
+          restore-keys: |
+            cargo-android-${{ matrix.rust_target }}-${{ env.PYDANTIC_CORE_VERSION }}-
+            cargo-android-${{ matrix.rust_target }}-
+
+      # ── 5. Install Rust + Android cross-compile target ──
+      - name: Install Rust stable + target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      # ── 6. Install Android NDK ${{ env.NDK_VERSION }} ──
+      - name: Install Android NDK
+        id: ndk
+        run: |
+          NDK_ZIP="android-ndk-${NDK_VERSION}-linux.zip"
+          curl -fsSL "https://dl.google.com/android/repository/${NDK_ZIP}" -o /tmp/ndk.zip
+          unzip -q /tmp/ndk.zip -d /opt
+          NDK_HOME="/opt/android-ndk-${NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=${NDK_HOME}" >> $GITHUB_ENV
+          echo "NDK_HOME=${NDK_HOME}"         >> $GITHUB_ENV
+          echo "${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
+      # ── 7. Install cargo-ndk ──
+      - name: Install cargo-ndk ${{ env.CARGO_NDK_VERSION }}
+        run: |
+          cargo install cargo-ndk \
+            --version ${{ env.CARGO_NDK_VERSION }} \
+            --locked
+
+      # ── 8. Install maturin ──
+      - name: Install maturin ${{ env.MATURIN_VERSION }}
+        run: pip install "maturin==${{ env.MATURIN_VERSION }}"
+
+      # ── 9. Configure linker for cross-compilation ──
+      # Maturin needs to know which linker to use for the Android target.
+      - name: Configure Cargo cross-linker
+        run: |
+          API=${{ env.ANDROID_API }}
+          NDK_BIN="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          case "${{ matrix.rust_target }}" in
+            aarch64-linux-android)
+              LINKER="${NDK_BIN}/aarch64-linux-android${API}-clang"
+              ;;
+            armv7-linux-androideabi)
+              LINKER="${NDK_BIN}/armv7a-linux-androideabi${API}-clang"
+              ;;
+            x86_64-linux-android)
+              LINKER="${NDK_BIN}/x86_64-linux-android${API}-clang"
+              ;;
+          esac
+
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml <<EOF
+          [target.${{ matrix.rust_target }}]
+          linker = "${LINKER}"
+          EOF
+
+          echo "CARGO_LINKER=${LINKER}" >> $GITHUB_ENV
+
+      # ── 10. Build the wheel ──
+      # We use maturin build with --target for cross-compilation.
+      # --release for optimised output.
+      # The wheel platform tag will be linux_aarch64 / linux_armv7l / linux_x86_64
+      # which Termux pip accepts directly.
+      - name: Build wheel
+        working-directory: ${{ env.PYDANTIC_CORE_DIR }}
+        env:
+          # Suppress pyo3 from trying to run the target Python
+          PYO3_CROSS: "1"
+          PYO3_CROSS_LIB_DIR: ""   # maturin resolves this itself
+          # Point cargo-ndk at the NDK
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+        run: |
+          # Derive short Python tag  e.g. "3.12" → "cp312"
+          PY_SHORT="cp$(echo ${{ env.PYTHON_VERSION }} | tr -d '.')"
+
+          maturin build \
+            --release \
+            --target ${{ matrix.rust_target }} \
+            --interpreter python${{ env.PYTHON_VERSION }} \
+            --out dist/ \
+            -v
+
+          echo "Built wheels:"
+          ls -lh dist/
+
+      # ── 11. Upload wheel as artifact ──
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pydantic-core-android-${{ matrix.abi }}-py${{ env.PYTHON_VERSION }}
+          path: ${{ env.PYDANTIC_CORE_DIR }}/dist/*.whl
+          retention-days: 30
+
+  # ─────────────────────────────────────────────────────────────
+  # Collect all wheels into one release artifact
+  # ─────────────────────────────────────────────────────────────
+  release:
+    name: Package all wheels
+    needs: build
+    runs-on: ubuntu-22.04
+    if: success()
+
+    steps:
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-wheels/
+          pattern: "pydantic-core-android-*"
+          merge-multiple: true
+
+      - name: List collected wheels
+        run: ls -lh all-wheels/
+
+      # Create a GitHub Release if this was triggered by a tag push
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: all-wheels/*.whl
+          generate_release_notes: true
+          name: "pydantic-core ${{ env.PYDANTIC_CORE_VERSION }} Android wheels"
+          body: |
+            ## pydantic-core Android wheels
+
+            Pre-built wheels for use in **Termux** on Android.
+
+            | Wheel | Target |
+            |---|---|
+            | `*linux_aarch64*` | Modern ARM64 Android (your Galaxy A14 5G, Pixel, etc.) |
+            | `*linux_armv7l*`  | 32-bit ARM Android |
+            | `*linux_x86_64*`  | Android emulators / x86 devices |
+
+            ### Install in Termux
+            ```bash
+            # Download the aarch64 wheel for your device
+            pip install pydantic_core-*-linux_aarch64.whl
+            ```
+
+            > **Note:** These wheels are tagged `linux_*` to match what Termux's
+            > Python reports as its platform. They are **not** suitable for
+            > non-Termux Android Python runtimes.
