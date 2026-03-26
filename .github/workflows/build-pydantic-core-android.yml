@@ -28,7 +28,7 @@ env:
   # NDK version - r26d is stable and well-tested for Rust cross-compile
   NDK_VERSION: r26d
   CARGO_NDK_VERSION: "3.5.4"
-  MATURIN_VERSION: "1.9.2"
+  MATURIN_VERSION: "1.11.0"
 
 jobs:
   # ─────────────────────────────────────────────────────────────
