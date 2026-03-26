@@ -5,26 +5,26 @@ on:
   workflow_dispatch:
     inputs:
       pydantic_core_version:
-        description: "pydantic-core version tag (e.g. v2.18.4)"
+        description: "pydantic-core version tag"
         required: true
-        default: "v2.18.4"
+        default: "v2.42.0"
       python_version:
         description: "Python version to target (e.g. 3.12 or 3.13)"
         required: true
         default: "3.13"
       android_api:
-        description: "Android API level (min 24)"
+        description: "Android API level (min 28)"
         required: true
-        default: "24"
+        default: "28"
   push:
     tags:
       - "android-pydantic-core-*"
 
 env:
   # Keep these in sync with your Termux Python build
-  PYDANTIC_CORE_VERSION: ${{ github.event.inputs.pydantic_core_version || 'v2.18.4' }}
-  PYTHON_VERSION:        ${{ github.event.inputs.python_version        || '3.12'    }}
-  ANDROID_API:           ${{ github.event.inputs.android_api           || '24'      }}
+  PYDANTIC_CORE_VERSION: ${{ github.event.inputs.pydantic_core_version || 'v2.42.0' }}
+  PYTHON_VERSION:        ${{ github.event.inputs.python_version        || '3.13'    }}
+  ANDROID_API:           ${{ github.event.inputs.android_api           || '28'      }}
   # NDK version - r26d is stable and well-tested for Rust cross-compile
   NDK_VERSION: r26d
   CARGO_NDK_VERSION: "3.5.4"
