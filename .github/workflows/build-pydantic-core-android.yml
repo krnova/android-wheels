@@ -153,7 +153,6 @@ jobs:
         env:
           # Suppress pyo3 from trying to run the target Python
           PYO3_CROSS: "1"
-          PYO3_CROSS_LIB_DIR: ""   # maturin resolves this itself
           # Point cargo-ndk at the NDK
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
         run: |
