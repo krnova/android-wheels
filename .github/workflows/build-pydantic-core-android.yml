@@ -149,6 +149,8 @@ jobs:
         working-directory: ${{ env.PYDANTIC_CORE_DIR }}
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+          # Maturin's own Android API level var — distinct from ANDROID_API
+          ANDROID_API_LEVEL: ${{ env.ANDROID_API }}
           # PYO3_CONFIG_FILE is already set above — maturin picks it up
           # and skips its own Python detection entirely.
           # Do NOT also set PYO3_CROSS / PYO3_CROSS_PYTHON_VERSION when
