@@ -1,12 +1,12 @@
-name: Build pydantic-core Android Wheels
+name: Build jiter Android Wheels
 
 on:
   workflow_dispatch:
     inputs:
-      pydantic_core_version:
-        description: "pydantic-core version tag"
+      jiter_version:
+        description: "jiter version tag"
         required: true
-        default: "v2.41.5"
+        default: "v0.13.0"
       python_version:
         description: "Python version to target (e.g. 3.12 or 3.13)"
         required: true
@@ -17,13 +17,13 @@ on:
         default: "28"
   push:
     tags:
-      - "v2*"
+      - "v0*"
 
 permissions:
   contents: write  # needed to create GitHub Releases
 
 env:
-  PYDANTIC_CORE_VERSION: ${{ github.event.inputs.pydantic_core_version || 'v2.41.5' }}
+  JITER_VERSION: ${{ github.event.inputs.jiter_version || 'v0.13.0' }}
   PYTHON_VERSION:        ${{ github.event.inputs.python_version        || '3.13'    }}
   ANDROID_API:           ${{ github.event.inputs.android_api           || '28'      }}
   NDK_VERSION:           r26d
@@ -56,12 +56,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Clone pydantic-core ${{ env.PYDANTIC_CORE_VERSION }}
+      - name: Clone jiter ${{ env.JITER_VERSION }}
         run: |
           git clone --depth 1 \
-            --branch ${{ env.PYDANTIC_CORE_VERSION }} \
-            https://github.com/pydantic/pydantic-core.git
-          echo "PYDANTIC_CORE_DIR=$GITHUB_WORKSPACE/pydantic-core" >> $GITHUB_ENV
+            --branch ${{ env.JITER_VERSION }} \
+            https://github.com/pydantic/jiter.git
+          echo "JITER_DIR=$GITHUB_WORKSPACE/jiter" >> $GITHUB_ENV
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
@@ -74,10 +74,10 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            pydantic-core/target
-          key: cargo-android-${{ matrix.rust_target }}-${{ env.PYDANTIC_CORE_VERSION }}-${{ hashFiles('pydantic-core/Cargo.lock') }}
+            jiter/target
+          key: cargo-android-${{ matrix.rust_target }}-${{ env.JITER_VERSION }}-${{ hashFiles('jiter/Cargo.lock') }}
           restore-keys: |
-            cargo-android-${{ matrix.rust_target }}-${{ env.PYDANTIC_CORE_VERSION }}-
+            cargo-android-${{ matrix.rust_target }}-${{ env.JITER_VERSION }}-
             cargo-android-${{ matrix.rust_target }}-
 
       - name: Install Rust stable + target ${{ matrix.rust_target }}
@@ -137,7 +137,7 @@ jobs:
           cat "$CONFIG_FILE"
 
       - name: Build wheel
-        working-directory: ${{ env.PYDANTIC_CORE_DIR }}
+        working-directory: ${{ env.JITER_DIR }}
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
           ANDROID_API_LEVEL: ${{ env.ANDROID_API }}
@@ -181,8 +181,8 @@ jobs:
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pydantic-core-android-${{ matrix.abi }}-py${{ env.PYTHON_VERSION }}
-          path: ${{ env.PYDANTIC_CORE_DIR }}/dist/*.whl
+          name: jiter-android-${{ matrix.abi }}-py${{ env.PYTHON_VERSION }}
+          path: ${{ env.JITER_DIR }}/dist/*.whl
           retention-days: 7
 
   release:
@@ -199,7 +199,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: all-wheels/
-          pattern: "pydantic-core-android-*"
+          pattern: "jiter-android-*"
           merge-multiple: true
 
       - name: List collected wheels
@@ -212,8 +212,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "${{ env.PYDANTIC_CORE_VERSION }}-android"
-          name: "pydantic-core ${{ env.PYDANTIC_CORE_VERSION }} Android (Termux)"
+          tag_name: "${{ env.JITER_VERSION }}-android"
+          name: "pydantic-core ${{ env.JITER_VERSION }} Android (Termux)"
           files: all-wheels/*.whl
           make_latest: true
           body: |
@@ -229,5 +229,5 @@ jobs:
 
             ### Install in Termux
             ```bash
-            pip install pydantic_core-*-android_arm64_v8a.whl
+            pip install jiter-*-android_arm64_v8a.whl
             ```
