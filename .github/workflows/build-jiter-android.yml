@@ -162,7 +162,7 @@ jobs:
       - name: Rename wheel tag to android_<arch>
         run: |
           ANDROID_TAG="android_${{ matrix.termux_arch }}"
-          for WHL in ${{ env.JITER_DIR }}/dist/*.whl; do
+          for WHL in ${{ env.JITER_DIR }}/crates/jiter-python/dist/*.whl; do
             NEW=$(echo "$WHL" \
               | sed "s/linux_aarch64/${ANDROID_TAG}/g" \
               | sed "s/linux_armv7l/${ANDROID_TAG}/g" \
