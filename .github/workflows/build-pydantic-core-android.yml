@@ -166,7 +166,10 @@ jobs:
             NEW=$(echo "$WHL" \
               | sed "s/linux_aarch64/${ANDROID_TAG}/g" \
               | sed "s/linux_armv7l/${ANDROID_TAG}/g" \
-              | sed "s/linux_x86_64/${ANDROID_TAG}/g")
+              | sed "s/linux_x86_64/${ANDROID_TAG}/g" \
+              | sed "s/android_[0-9]*_arm64_v8a/${ANDROID_TAG}/g" \
+              | sed "s/android_[0-9]*_arm/${ANDROID_TAG}/g" \
+              | sed "s/android_[0-9]*_x86_64/${ANDROID_TAG}/g")
             if [ "$WHL" != "$NEW" ]; then
               mv "$WHL" "$NEW"
               echo "Renamed: $(basename $WHL) -> $(basename $NEW)"
@@ -206,6 +209,7 @@ jobs:
       # files. GitHub Actions artifacts are always zipped - releases are not.
       # Tag format: "v2.41.5-android" - overwritten on re-run.
       - name: Create or update GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "${{ env.PYDANTIC_CORE_VERSION }}-android"
