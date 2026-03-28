@@ -40,7 +40,6 @@ jobs:
         include:
           - abi: aarch64
             rust_target: aarch64-linux-android
-            # Matches pip tag: cp313-cp313-android_arm64_v8a
             termux_arch: arm64_v8a
             pointer_width: 64
           - abi: armv7
@@ -97,7 +96,6 @@ jobs:
       - name: Install maturin ${{ env.MATURIN_VERSION }}
         run: pip install "maturin==${{ env.MATURIN_VERSION }}"
 
-      # Use env vars for linker (avoids TOML indentation bugs from heredoc in YAML)
       - name: Set CARGO_TARGET linker env var
         run: |
           API=${{ env.ANDROID_API }}
@@ -111,10 +109,52 @@ jobs:
               echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=${NDK_BIN}/x86_64-linux-android${API}-clang" >> $GITHUB_ENV ;;
           esac
 
-      # Write a manual pyo3 config to suppress -lpython3.x at link time.
-      # Android extension modules resolve Python symbols via dlopen at runtime
-      # so there is nothing to link against. Without this, cargo exits 101
-      # with "unable to find library -lpython3.13".
+      # Pull libpython3.x.so from the Termux package repo so the NDK linker
+      # can record it in the .so's NEEDED section. At runtime in Termux the
+      # real library lives at /data/data/com.termux/files/usr/lib and dlopen
+      # resolves it automatically. We use the aarch64 .deb for all targets
+      # because we only need the stub for its symbol table, not to execute it.
+      - name: Fetch Termux libpython${{ env.PYTHON_VERSION }} stub
+        run: |
+          PY_VER="${{ env.PYTHON_VERSION }}"
+          STUB_DIR="/tmp/termux-python-stub"
+          mkdir -p "${STUB_DIR}"
+
+          # Find the exact .deb path from the Termux package index
+          DEB_PATH=$(curl -fsSL \
+            "https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages" \
+            | awk '/^Package: python$/{found=1} found && /^Filename:/{print $2; exit}')
+
+          if [ -z "$DEB_PATH" ]; then
+            echo "ERROR: could not find python package in Termux index" && exit 1
+          fi
+
+          curl -fsSL "https://packages.termux.dev/${DEB_PATH}" -o /tmp/python-termux.deb
+
+          # A .deb is an ar archive containing data.tar.{zst,xz,gz}
+          cd /tmp
+          ar x python-termux.deb
+          DATA_TAR=$(ls data.tar.* 2>/dev/null | head -1)
+          tar -xf "${DATA_TAR}" -C "${STUB_DIR}" \
+            --wildcards "*/libpython${PY_VER}.so*" \
+            --wildcards "*/libpython${PY_VER}*.so*" \
+            || true
+
+          # Flatten: copy to a clean path the linker flag can reference directly
+          SO_PATH=$(find "${STUB_DIR}" -name "libpython${PY_VER}.so*" | head -1)
+          if [ -z "$SO_PATH" ]; then
+            echo "ERROR: libpython${PY_VER}.so not found in Termux package" && exit 1
+          fi
+          cp "$SO_PATH" "${STUB_DIR}/libpython${PY_VER}.so"
+
+          echo "TERMUX_PYTHON_STUB_DIR=${STUB_DIR}" >> $GITHUB_ENV
+          echo "Stub ready: $(ls -lh ${STUB_DIR}/libpython${PY_VER}.so)"
+
+      # lib_dir points at the Termux stub so pyo3 emits -lpython3.x at link
+      # time, causing the NDK linker to add a NEEDED entry for it.
+      # suppress_build_script_link_lines=false is intentional here — we WANT
+      # the link directive; the stub satisfies the linker without baking in
+      # a host path.
       - name: Write pyo3 cross-compile config
         run: |
           PY_VER="${{ env.PYTHON_VERSION }}"
@@ -125,11 +165,11 @@ jobs:
           shared=true
           abi3=false
           lib_name=python${PY_VER}
-          lib_dir=
+          lib_dir=${TERMUX_PYTHON_STUB_DIR}
           executable=
           pointer_width=${{ matrix.pointer_width }}
           build_flags=
-          suppress_build_script_link_lines=true
+          suppress_build_script_link_lines=false
           PYCFG
           sed -i 's/^[[:space:]]*//' "$CONFIG_FILE"
           echo "PYO3_CONFIG_FILE=${CONFIG_FILE}" >> $GITHUB_ENV
@@ -141,8 +181,21 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
           ANDROID_API_LEVEL: ${{ env.ANDROID_API }}
-          # PYO3_CONFIG_FILE already set above - do NOT also set PYO3_CROSS
-          # or PYO3_CROSS_PYTHON_VERSION, they conflict with PYO3_CONFIG_FILE
+          # PYO3_CONFIG_FILE set above. Do NOT also set PYO3_CROSS or
+          # PYO3_CROSS_PYTHON_VERSION — they conflict with PYO3_CONFIG_FILE.
+          #
+          # RUSTFLAGS breakdown:
+          #   -L           : add stub dir to linker search path
+          #   -C link-arg=-lpython<ver>  : explicitly link libpython (belt & suspenders
+          #                  alongside pyo3's cargo:rustc-link-lib directive)
+          #   -C link-arg=-Wl,-rpath-link : transitive dep resolution at link time only;
+          #                  does NOT embed an RPATH in the binary (correct for Termux)
+          # NOTE: -Wl,-undefined,dynamic_lookup is macOS ld ONLY and will error
+          # with "unknown argument" on Android's LLD — do not add it.
+          RUSTFLAGS: >-
+            -L ${{ env.TERMUX_PYTHON_STUB_DIR }}
+            -C link-arg=-lpython${{ env.PYTHON_VERSION }}
+            -C link-arg=-Wl,-rpath-link,${{ env.TERMUX_PYTHON_STUB_DIR }}
         run: |
           maturin build \
             --release \
@@ -178,6 +231,23 @@ jobs:
           echo "Final wheels:"
           ls -lh ${{ env.PYDANTIC_CORE_DIR }}/dist/
 
+      # Verify the built .so has libpython in its NEEDED section.
+      # If it is absent, the dlopen ImportError will recur at runtime in Termux.
+      - name: Verify NEEDED entries in built .so
+        run: |
+          NDK_BIN="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          for WHL in ${{ env.PYDANTIC_CORE_DIR }}/dist/*.whl; do
+            echo "=== $(basename $WHL) ==="
+            unzip -p "$WHL" "*.so" > /tmp/check.so 2>/dev/null || { echo "no .so found"; continue; }
+            ${NDK_BIN}/llvm-readelf -d /tmp/check.so \
+              | grep -E "(NEEDED|SONAME)" \
+              || echo "WARNING: no dynamic section found"
+            # Fail CI if libpython is missing from NEEDED
+            ${NDK_BIN}/llvm-readelf -d /tmp/check.so \
+              | grep -q "libpython" \
+              || { echo "ERROR: libpython not in NEEDED — stub linkage failed" && exit 1; }
+          done
+
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
@@ -190,7 +260,6 @@ jobs:
     needs: build
     runs-on: ubuntu-22.04
     if: success()
-    # Needs write permission to create releases
     permissions:
       contents: write
 
@@ -205,9 +274,6 @@ jobs:
       - name: List collected wheels
         run: ls -lh all-wheels/
 
-      # Always publish a release so wheels are downloadable as individual
-      # files. GitHub Actions artifacts are always zipped - releases are not.
-      # Tag format: "v2.41.5-android" - overwritten on re-run.
       - name: Create or update GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
