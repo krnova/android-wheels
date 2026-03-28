@@ -137,7 +137,7 @@ jobs:
           cat "$CONFIG_FILE"
 
       - name: Build wheel
-        working-directory: ${{ env.JITER_DIR }}
+        working-directory: ${{ env.JITER_DIR }}/crates/jiter-python
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
           ANDROID_API_LEVEL: ${{ env.ANDROID_API }}
@@ -162,7 +162,7 @@ jobs:
       - name: Rename wheel tag to android_<arch>
         run: |
           ANDROID_TAG="android_${{ matrix.termux_arch }}"
-          for WHL in ${{ env.PYDANTIC_CORE_DIR }}/dist/*.whl; do
+          for WHL in ${{ env.JITER_DIR }}/dist/*.whl; do
             NEW=$(echo "$WHL" \
               | sed "s/linux_aarch64/${ANDROID_TAG}/g" \
               | sed "s/linux_armv7l/${ANDROID_TAG}/g" \
@@ -176,7 +176,7 @@ jobs:
             fi
           done
           echo "Final wheels:"
-          ls -lh ${{ env.PYDANTIC_CORE_DIR }}/dist/
+          ls -lh ${{ env.JITER_DIR }}/dist/
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
@@ -213,11 +213,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "${{ env.JITER_VERSION }}-android"
-          name: "pydantic-core ${{ env.JITER_VERSION }} Android (Termux)"
+          name: "jiter ${{ env.JITER_VERSION }} Android (Termux)"
           files: all-wheels/*.whl
           make_latest: true
           body: |
-            ## pydantic-core ${{ env.PYDANTIC_CORE_VERSION }} Android wheels
+            ## jiter ${{ env.JITER_VERSION }} Android wheels
 
             Built for Termux. Python ${{ env.PYTHON_VERSION }}, API level ${{ env.ANDROID_API }}.
 
