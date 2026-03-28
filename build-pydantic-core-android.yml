@@ -1,0 +1,233 @@
+name: Build pydantic-core Android Wheels
+
+on:
+  workflow_dispatch:
+    inputs:
+      pydantic_core_version:
+        description: "pydantic-core version tag"
+        required: true
+        default: "v2.41.5"
+      python_version:
+        description: "Python version to target (e.g. 3.12 or 3.13)"
+        required: true
+        default: "3.13"
+      android_api:
+        description: "Android API level (min 28)"
+        required: true
+        default: "28"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write  # needed to create GitHub Releases
+
+env:
+  PYDANTIC_CORE_VERSION: ${{ github.event.inputs.pydantic_core_version || 'v2.41.5' }}
+  PYTHON_VERSION:        ${{ github.event.inputs.python_version        || '3.13'    }}
+  ANDROID_API:           ${{ github.event.inputs.android_api           || '28'      }}
+  NDK_VERSION:           r26d
+  MATURIN_VERSION:       "1.11.0"
+
+jobs:
+  build:
+    name: "${{ matrix.abi }} (API ${{ github.event.inputs.android_api || '28' }})"
+    runs-on: ubuntu-22.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: aarch64
+            rust_target: aarch64-linux-android
+            # Matches pip tag: cp313-cp313-android_arm64_v8a
+            termux_arch: arm64_v8a
+            pointer_width: 64
+          - abi: armv7
+            rust_target: armv7-linux-androideabi
+            termux_arch: arm
+            pointer_width: 32
+          - abi: x86_64
+            rust_target: x86_64-linux-android
+            termux_arch: x86_64
+            pointer_width: 64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Clone pydantic-core ${{ env.PYDANTIC_CORE_VERSION }}
+        run: |
+          git clone --depth 1 \
+            --branch ${{ env.PYDANTIC_CORE_VERSION }} \
+            https://github.com/pydantic/pydantic-core.git
+          echo "PYDANTIC_CORE_DIR=$GITHUB_WORKSPACE/pydantic-core" >> $GITHUB_ENV
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            pydantic-core/target
+          key: cargo-android-${{ matrix.rust_target }}-${{ env.PYDANTIC_CORE_VERSION }}-${{ hashFiles('pydantic-core/Cargo.lock') }}
+          restore-keys: |
+            cargo-android-${{ matrix.rust_target }}-${{ env.PYDANTIC_CORE_VERSION }}-
+            cargo-android-${{ matrix.rust_target }}-
+
+      - name: Install Rust stable + target ${{ matrix.rust_target }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Install Android NDK ${{ env.NDK_VERSION }}
+        run: |
+          NDK_ZIP="android-ndk-${NDK_VERSION}-linux.zip"
+          curl -fsSL "https://dl.google.com/android/repository/${NDK_ZIP}" -o /tmp/ndk.zip
+          unzip -q /tmp/ndk.zip -d /opt
+          NDK_HOME="/opt/android-ndk-${NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=${NDK_HOME}" >> $GITHUB_ENV
+          echo "${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
+      - name: Install maturin ${{ env.MATURIN_VERSION }}
+        run: pip install "maturin==${{ env.MATURIN_VERSION }}"
+
+      # Use env vars for linker (avoids TOML indentation bugs from heredoc in YAML)
+      - name: Set CARGO_TARGET linker env var
+        run: |
+          API=${{ env.ANDROID_API }}
+          NDK_BIN="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          case "${{ matrix.rust_target }}" in
+            aarch64-linux-android)
+              echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${NDK_BIN}/aarch64-linux-android${API}-clang" >> $GITHUB_ENV ;;
+            armv7-linux-androideabi)
+              echo "CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER=${NDK_BIN}/armv7a-linux-androideabi${API}-clang" >> $GITHUB_ENV ;;
+            x86_64-linux-android)
+              echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=${NDK_BIN}/x86_64-linux-android${API}-clang" >> $GITHUB_ENV ;;
+          esac
+
+      # Write a manual pyo3 config to suppress -lpython3.x at link time.
+      # Android extension modules resolve Python symbols via dlopen at runtime
+      # so there is nothing to link against. Without this, cargo exits 101
+      # with "unable to find library -lpython3.13".
+      - name: Write pyo3 cross-compile config
+        run: |
+          PY_VER="${{ env.PYTHON_VERSION }}"
+          CONFIG_FILE="/tmp/pyo3-cross-config-${{ matrix.rust_target }}.txt"
+          cat > "$CONFIG_FILE" << PYCFG
+          implementation=CPython
+          version=$PY_VER
+          shared=true
+          abi3=false
+          lib_name=python${PY_VER}
+          lib_dir=
+          executable=
+          pointer_width=${{ matrix.pointer_width }}
+          build_flags=
+          suppress_build_script_link_lines=true
+          PYCFG
+          sed -i 's/^[[:space:]]*//' "$CONFIG_FILE"
+          echo "PYO3_CONFIG_FILE=${CONFIG_FILE}" >> $GITHUB_ENV
+          echo "--- pyo3 config ---"
+          cat "$CONFIG_FILE"
+
+      - name: Build wheel
+        working-directory: ${{ env.PYDANTIC_CORE_DIR }}
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+          ANDROID_API_LEVEL: ${{ env.ANDROID_API }}
+          # PYO3_CONFIG_FILE already set above - do NOT also set PYO3_CROSS
+          # or PYO3_CROSS_PYTHON_VERSION, they conflict with PYO3_CONFIG_FILE
+        run: |
+          maturin build \
+            --release \
+            --target ${{ matrix.rust_target }} \
+            --interpreter python${{ env.PYTHON_VERSION }} \
+            --manylinux off \
+            --out dist/ \
+            -v
+
+          echo "Built wheels:"
+          ls -lh dist/
+
+      # Rename linux_* platform tag to android_<arch> (no API number).
+      # pip's top supported tag is android_arm64_v8a (no API), which works
+      # across all Android versions. An API-specific tag like android_28_*
+      # would fail on devices reporting a different API (e.g. android-24).
+      - name: Rename wheel tag to android_<arch>
+        run: |
+          ANDROID_TAG="android_${{ matrix.termux_arch }}"
+          for WHL in ${{ env.PYDANTIC_CORE_DIR }}/dist/*.whl; do
+            NEW=$(echo "$WHL" \
+              | sed "s/linux_aarch64/${ANDROID_TAG}/g" \
+              | sed "s/linux_armv7l/${ANDROID_TAG}/g" \
+              | sed "s/linux_x86_64/${ANDROID_TAG}/g" \
+              | sed "s/android_[0-9]*_arm64_v8a/${ANDROID_TAG}/g" \
+              | sed "s/android_[0-9]*_arm/${ANDROID_TAG}/g" \
+              | sed "s/android_[0-9]*_x86_64/${ANDROID_TAG}/g")
+            if [ "$WHL" != "$NEW" ]; then
+              mv "$WHL" "$NEW"
+              echo "Renamed: $(basename $WHL) -> $(basename $NEW)"
+            fi
+          done
+          echo "Final wheels:"
+          ls -lh ${{ env.PYDANTIC_CORE_DIR }}/dist/
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pydantic-core-android-${{ matrix.abi }}-py${{ env.PYTHON_VERSION }}
+          path: ${{ env.PYDANTIC_CORE_DIR }}/dist/*.whl
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+    if: success()
+    # Needs write permission to create releases
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-wheels/
+          pattern: "pydantic-core-android-*"
+          merge-multiple: true
+
+      - name: List collected wheels
+        run: ls -lh all-wheels/
+
+      # Always publish a release so wheels are downloadable as individual
+      # files. GitHub Actions artifacts are always zipped - releases are not.
+      # Tag format: "v2.41.5-android" - overwritten on re-run.
+      - name: Create or update GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "${{ env.PYDANTIC_CORE_VERSION }}-android"
+          name: "pydantic-core ${{ env.PYDANTIC_CORE_VERSION }} Android (Termux)"
+          files: all-wheels/*.whl
+          make_latest: true
+          body: |
+            ## pydantic-core ${{ env.PYDANTIC_CORE_VERSION }} Android wheels
+
+            Built for Termux. Python ${{ env.PYTHON_VERSION }}, API level ${{ env.ANDROID_API }}.
+
+            | Wheel | Target |
+            |---|---|
+            | `*android_arm64_v8a*` | ARM64 - Galaxy A14 5G, Pixels, most modern devices |
+            | `*android_arm*`       | 32-bit ARM |
+            | `*android_x86_64*`    | Emulators / x86 devices |
+
+            ### Install in Termux
+            ```bash
+            pip install pydantic_core-*-android_arm64_v8a.whl
+            ```
