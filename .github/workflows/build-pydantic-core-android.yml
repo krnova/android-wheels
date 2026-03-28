@@ -37,21 +37,21 @@ jobs:
         include:
           - abi: aarch64
             rust_target: aarch64-linux-android
-            # What Termux Python 3.12+ reports from sysconfig.get_platform()
-            # "android-28-arm64" → normalised wheel tag: android_28_arm64
             termux_arch: arm64
+            pointer_width: 64
           - abi: armv7
             rust_target: armv7-linux-androideabi
             termux_arch: arm
+            pointer_width: 32
           - abi: x86_64
             rust_target: x86_64-linux-android
             termux_arch: x86_64
+            pointer_width: 64
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── Clone pydantic-core ──────────────────────────────────────────────
       - name: Clone pydantic-core ${{ env.PYDANTIC_CORE_VERSION }}
         run: |
           git clone --depth 1 \
@@ -59,13 +59,11 @@ jobs:
             https://github.com/pydantic/pydantic-core.git
           echo "PYDANTIC_CORE_DIR=$GITHUB_WORKSPACE/pydantic-core" >> $GITHUB_ENV
 
-      # ── Host Python (maturin needs it to resolve abi tags) ──────────────
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      # ── Cargo cache ─────────────────────────────────────────────────────
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -78,13 +76,11 @@ jobs:
             cargo-android-${{ matrix.rust_target }}-${{ env.PYDANTIC_CORE_VERSION }}-
             cargo-android-${{ matrix.rust_target }}-
 
-      # ── Rust toolchain + Android target ─────────────────────────────────
       - name: Install Rust stable + target ${{ matrix.rust_target }}
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}
 
-      # ── Android NDK ─────────────────────────────────────────────────────
       - name: Install Android NDK ${{ env.NDK_VERSION }}
         run: |
           NDK_ZIP="android-ndk-${NDK_VERSION}-linux.zip"
@@ -94,43 +90,69 @@ jobs:
           echo "ANDROID_NDK_HOME=${NDK_HOME}" >> $GITHUB_ENV
           echo "${NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
 
-      # ── maturin ─────────────────────────────────────────────────────────
       - name: Install maturin ${{ env.MATURIN_VERSION }}
         run: pip install "maturin==${{ env.MATURIN_VERSION }}"
 
-      # ── Resolve linker path and export as CARGO_TARGET_*_LINKER ─────────
-      # Using env vars instead of ~/.cargo/config.toml avoids heredoc
-      # indentation turning into invalid TOML section headers.
+      # ── Set linker via env var (avoids TOML indentation bugs) ───────────
       - name: Set CARGO_TARGET linker env var
         run: |
           API=${{ env.ANDROID_API }}
           NDK_BIN="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-
           case "${{ matrix.rust_target }}" in
             aarch64-linux-android)
-              LINKER="${NDK_BIN}/aarch64-linux-android${API}-clang"
-              echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${LINKER}" >> $GITHUB_ENV
-              ;;
+              echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${NDK_BIN}/aarch64-linux-android${API}-clang" >> $GITHUB_ENV ;;
             armv7-linux-androideabi)
-              LINKER="${NDK_BIN}/armv7a-linux-androideabi${API}-clang"
-              echo "CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER=${LINKER}" >> $GITHUB_ENV
-              ;;
+              echo "CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER=${NDK_BIN}/armv7a-linux-androideabi${API}-clang" >> $GITHUB_ENV ;;
             x86_64-linux-android)
-              LINKER="${NDK_BIN}/x86_64-linux-android${API}-clang"
-              echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=${LINKER}" >> $GITHUB_ENV
-              ;;
+              echo "CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=${NDK_BIN}/x86_64-linux-android${API}-clang" >> $GITHUB_ENV ;;
           esac
+
+      # ── Write manual pyo3 cross-compilation config ───────────────────────
+      # Why: When cross-compiling for Android, pyo3's build script can't run
+      # the target Python to detect its config, so it falls back to linking
+      # -lpython3.x. But libpython doesn't exist in the NDK sysroot — Android
+      # extension modules get Python symbols resolved at runtime via dlopen.
+      #
+      # suppress_build_script_link_lines=true is the key: it tells pyo3 NOT
+      # to emit `-lpython3.x` to the linker. The .so will still work because
+      # Python resolves the symbols when it loads the extension module.
+      - name: Write pyo3 cross-compile config
+        run: |
+          PY_VER="${{ env.PYTHON_VERSION }}"
+          # e.g. "3.13" → minor="13", lib_name="python3.13"
+          PY_MINOR=$(echo "$PY_VER" | cut -d. -f2)
+
+          CONFIG_FILE="/tmp/pyo3-cross-config-${{ matrix.rust_target }}.txt"
+
+          cat > "$CONFIG_FILE" <<EOF
+          implementation=CPython
+          version=$PY_VER
+          shared=true
+          abi3=false
+          lib_name=python${PY_VER}
+          lib_dir=
+          executable=
+          pointer_width=${{ matrix.pointer_width }}
+          build_flags=
+          suppress_build_script_link_lines=true
+          EOF
+
+          # Strip leading whitespace (heredoc indentation from YAML)
+          sed -i 's/^[[:space:]]*//' "$CONFIG_FILE"
+
+          echo "PYO3_CONFIG_FILE=${CONFIG_FILE}" >> $GITHUB_ENV
+          echo "--- pyo3 config ---"
+          cat "$CONFIG_FILE"
 
       # ── Build ────────────────────────────────────────────────────────────
       - name: Build wheel
         working-directory: ${{ env.PYDANTIC_CORE_DIR }}
         env:
-          # Tell pyo3 this is a cross build — stops it trying to run target Python
-          PYO3_CROSS: "1"
-          # REQUIRED: pyo3 uses this to generate the abi config file.
-          # Without it, cargo exits 101 because the config file stays empty/invalid.
-          PYO3_CROSS_PYTHON_VERSION: ${{ env.PYTHON_VERSION }}
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+          # PYO3_CONFIG_FILE is already set above — maturin picks it up
+          # and skips its own Python detection entirely.
+          # Do NOT also set PYO3_CROSS / PYO3_CROSS_PYTHON_VERSION when
+          # using PYO3_CONFIG_FILE; they conflict and confuse the build script.
         run: |
           maturin build \
             --release \
@@ -143,21 +165,15 @@ jobs:
           echo "Built wheels:"
           ls -lh dist/
 
-      # ── Rename wheel platform tag to match Termux sysconfig ─────────────
-      # Termux Python 3.12+ reports "android-<API>-arm64" from
-      # sysconfig.get_platform(), which pip normalises to android_<API>_arm64.
-      # Maturin tags the wheel linux_aarch64 (based on the rust triple).
-      # We rename so pip --find-links / direct install works without --platform.
-      - name: Rename wheel tag → android_<API>_<arch>
+      # ── Rename wheel tag → android_<API>_<arch> ──────────────────────────
+      - name: Rename wheel tag
         run: |
           API=${{ env.ANDROID_API }}
-
           case "${{ matrix.abi }}" in
             aarch64) TERMUX_ARCH="arm64"  ;;
             armv7)   TERMUX_ARCH="arm"    ;;
             x86_64)  TERMUX_ARCH="x86_64" ;;
           esac
-
           ANDROID_TAG="android_${API}_${TERMUX_ARCH}"
 
           for WHL in ${{ env.PYDANTIC_CORE_DIR }}/dist/*.whl; do
@@ -167,15 +183,13 @@ jobs:
               | sed "s/linux_x86_64/${ANDROID_TAG}/g")
             if [ "$WHL" != "$NEW" ]; then
               mv "$WHL" "$NEW"
-              echo "Renamed: $(basename $WHL)"
-              echo "     to: $(basename $NEW)"
+              echo "Renamed: $(basename $WHL) → $(basename $NEW)"
             fi
           done
 
           echo "Final wheels:"
           ls -lh ${{ env.PYDANTIC_CORE_DIR }}/dist/
 
-      # ── Upload artifact ──────────────────────────────────────────────────
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
@@ -183,7 +197,6 @@ jobs:
           path: ${{ env.PYDANTIC_CORE_DIR }}/dist/*.whl
           retention-days: 30
 
-  # ── Collect + release ────────────────────────────────────────────────────
   release:
     name: Package all wheels
     needs: build
@@ -221,5 +234,3 @@ jobs:
             ```bash
             pip install pydantic_core-*-android_28_arm64.whl
             ```
-
-            Platform tags match what `python -c "import sysconfig; print(sysconfig.get_platform())"` returns in Termux Python 3.12+.
