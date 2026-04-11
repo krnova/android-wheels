@@ -45,7 +45,7 @@ jobs:
 
           TEMPLATE=srcpkgs/mesa/template
 
-          sed -i 's/gallium_drivers="\([^"]*\)"/gallium_drivers="\1,virpipe"/' $TEMPLATE
+          sed -i 's/gallium_drivers="\([^"]*\)"/gallium_drivers="\1,virgl"/' $TEMPLATE
           sed -i 's/vulkan_drivers="\([^"]*\)"/vulkan_drivers="\1,virtio"/' $TEMPLATE
 
           grep -E "gallium_drivers|vulkan_drivers" $TEMPLATE
