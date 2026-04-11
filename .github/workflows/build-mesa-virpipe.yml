@@ -55,13 +55,11 @@ jobs:
 
           TEMPLATE=srcpkgs/mesa/template
 
-          # Print template for inspection
-          cat $TEMPLATE
-
-          sed -i 's/gallium_drivers="\([^"]*\)"/gallium_drivers="\1,virgl"/' $TEMPLATE
+          # virgl is already enabled via _have_virgl=yes for aarch64 in the template
+          # just verify it's there and add virtio vulkan
           sed -i 's/vulkan_drivers="\([^"]*\)"/vulkan_drivers="\1,virtio"/' $TEMPLATE
 
-          grep -E "gallium_drivers|vulkan_drivers" $TEMPLATE
+          grep -E "_have_virgl|gallium_drivers|vulkan_drivers" $TEMPLATE
 
           ./xbps-src -a aarch64 pkg mesa
 
