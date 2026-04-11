@@ -32,33 +32,40 @@ jobs:
               xbps-install -Su --ignore base-files -y || true
 
               # Install xbps-src dependencies
-              xbps-install -y git xtools base-devel
+              xbps-install -y git xtools base-devel sudo
+
+              # Create non-root user for xbps-src
+              useradd -m builder
+              echo "builder ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
               # Clone void-packages
               git clone --depth=1 https://github.com/void-linux/void-packages.git /void-packages
-              cd /void-packages
+              chown -R builder:builder /void-packages
+              chown builder:builder /output
 
-              # Bootstrap xbps-src
-              ./xbps-src binary-bootstrap
+              # Run xbps-src as builder
+              su builder -c '\''\
+                set -e
+                cd /void-packages
 
-              # Patch Mesa template to add virpipe to gallium drivers
-              TEMPLATE=srcpkgs/mesa/template
+                # Bootstrap xbps-src
+                ./xbps-src binary-bootstrap
 
-              # Show current gallium drivers line
-              grep "gallium" $TEMPLATE || true
+                # Patch Mesa template to add virpipe to gallium drivers
+                TEMPLATE=srcpkgs/mesa/template
 
-              # Add virpipe to gallium_drivers
-              sed -i "s/gallium_drivers=\"\([^\"]*\)\"/gallium_drivers=\"\1,virpipe\"/" $TEMPLATE
+                # Add virpipe to gallium_drivers
+                sed -i "s/gallium_drivers=\"\([^\"]*\)\"/gallium_drivers=\"\1,virpipe\"/" $TEMPLATE
 
-              # Verify patch
-              grep "gallium" $TEMPLATE
+                # Verify patch
+                grep "gallium" $TEMPLATE
 
-              # Build mesa (this will take a while)
-              ./xbps-src pkg mesa
+                # Build mesa
+                ./xbps-src pkg mesa
 
-              # Copy resulting packages to output
-              find hostdir/binpkgs -name "*.xbps" | xargs -I{} cp {} /output/
-            '
+                # Copy resulting packages to output
+                find hostdir/binpkgs -name "*.xbps" | xargs -I{} cp {} /output/
+              '\''
 
       - name: Upload Mesa packages
         uses: actions/upload-artifact@v4
