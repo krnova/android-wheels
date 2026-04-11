@@ -1,0 +1,67 @@
+name: Build Mesa with virpipe (Void Linux aarch64)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install QEMU for aarch64 emulation
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y qemu-user-static binfmt-support
+          sudo update-binfmts --enable qemu-aarch64
+
+      - name: Pull Void Linux aarch64 container
+        run: |
+          docker pull ghcr.io/void-linux/void-linux:latest-full-aarch64
+
+      - name: Build Mesa with virpipe inside Void aarch64
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v ${{ github.workspace }}:/output \
+            ghcr.io/void-linux/void-linux:latest-full-aarch64 \
+            sh -c '
+              set -e
+
+              # Update repos
+              xbps-install -Syu xbps -y
+              xbps-install -Syu -y
+
+              # Install xbps-src dependencies
+              xbps-install -y git xtools base-devel
+
+              # Clone void-packages
+              git clone --depth=1 https://github.com/void-linux/void-packages.git /void-packages
+              cd /void-packages
+
+              # Bootstrap xbps-src
+              ./xbps-src binary-bootstrap
+
+              # Patch Mesa template to add virpipe to gallium drivers
+              TEMPLATE=srcpkgs/mesa/template
+
+              # Show current gallium drivers line
+              grep "gallium" $TEMPLATE || true
+
+              # Add virpipe to gallium_drivers
+              sed -i "s/gallium_drivers=\"\([^\"]*\)\"/gallium_drivers=\"\1,virpipe\"/" $TEMPLATE
+
+              # Verify patch
+              grep "gallium" $TEMPLATE
+
+              # Build mesa (this will take a while)
+              ./xbps-src pkg mesa
+
+              # Copy resulting packages to output
+              find hostdir/binpkgs -name "*.xbps" | xargs -I{} cp {} /output/
+            '
+
+      - name: Upload Mesa packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: mesa-virpipe-aarch64
+          path: "*.xbps"
+          retention-days: 7
