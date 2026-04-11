@@ -21,14 +21,15 @@ jobs:
       - name: Build Mesa with virpipe inside Void aarch64
         run: |
           docker run --rm --platform linux/arm64 \
+            --privileged \
             -v ${{ github.workspace }}:/output \
             ghcr.io/void-linux/void-linux:latest-full-aarch64 \
             sh -c '
               set -e
 
-              # Update repos
+              # Update repos without upgrading base-files to avoid mtab issue
               xbps-install -Syu xbps -y
-              xbps-install -Syu -y
+              xbps-install -Su --ignore base-files -y || true
 
               # Install xbps-src dependencies
               xbps-install -y git xtools base-devel
