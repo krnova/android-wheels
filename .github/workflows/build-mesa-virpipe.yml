@@ -11,6 +11,16 @@ jobs:
       - name: Pull native Void Linux x86_64 container
         run: docker pull ghcr.io/void-linux/void-linux:latest-full-x86_64
 
+      - name: Cache void-packages masterdir
+        uses: actions/cache@v4
+        with:
+          path: |
+            void-packages/hostdir
+            void-packages/masterdir
+          key: void-xbps-src-${{ runner.os }}-${{ hashFiles('void-packages/srcpkgs/mesa/template') }}
+          restore-keys: |
+            void-xbps-src-${{ runner.os }}-
+
       - name: Write builder script
         run: |
           cat > ${{ github.workspace }}/build.sh << 'SCRIPT'
@@ -30,7 +40,7 @@ jobs:
           groupadd xbuilder 2>/dev/null || true
           usermod -aG xbuilder builder
 
-          git clone --depth=1 https://github.com/void-linux/void-packages.git /void-packages
+          git clone --depth=1 https://github.com/void-linux/void-packages.git /void-packages || true
           chown -R builder:builder /void-packages
           chown builder:builder /output
 
