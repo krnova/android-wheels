@@ -38,6 +38,8 @@ jobs:
           cd /void-packages
 
           ./xbps-src binary-bootstrap
+          echo XBPS_ALLOW_CHROOT_BREAKOUT=yes >> etc/conf
+          echo XBPS_CHROOT_CMD=uchroot >> etc/conf
 
           TEMPLATE=srcpkgs/mesa/template
 
