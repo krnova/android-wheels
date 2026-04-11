@@ -45,6 +45,9 @@ jobs:
 
           TEMPLATE=srcpkgs/mesa/template
 
+          # Print template for inspection
+          cat $TEMPLATE
+
           sed -i 's/gallium_drivers="\([^"]*\)"/gallium_drivers="\1,virgl"/' $TEMPLATE
           sed -i 's/vulkan_drivers="\([^"]*\)"/vulkan_drivers="\1,virtio"/' $TEMPLATE
 
