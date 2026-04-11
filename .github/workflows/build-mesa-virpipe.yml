@@ -9,8 +9,52 @@ jobs:
 
     steps:
       - name: Pull native Void Linux x86_64 container
+        run: docker pull ghcr.io/void-linux/void-linux:latest-full-x86_64
+
+      - name: Write builder script
         run: |
-          docker pull ghcr.io/void-linux/void-linux:latest-full-x86_64
+          cat > ${{ github.workspace }}/build.sh << 'SCRIPT'
+          #!/bin/sh
+          set -e
+
+          # Update repos
+          xbps-install -Syu xbps -y
+          xbps-install -Su --ignore base-files -y || true
+
+          # Install dependencies
+          xbps-install -y git xtools base-devel sudo
+
+          # Create non-root user
+          useradd -m builder
+          echo "builder ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+          git clone --depth=1 https://github.com/void-linux/void-packages.git /void-packages
+          chown -R builder:builder /void-packages
+          chown builder:builder /output
+
+          cat > /home/builder/xbps-build.sh << 'BUILDER'
+          #!/bin/sh
+          set -e
+          cd /void-packages
+
+          ./xbps-src binary-bootstrap
+
+          TEMPLATE=srcpkgs/mesa/template
+
+          sed -i 's/gallium_drivers="\([^"]*\)"/gallium_drivers="\1,virpipe"/' $TEMPLATE
+          sed -i 's/vulkan_drivers="\([^"]*\)"/vulkan_drivers="\1,virtio"/' $TEMPLATE
+
+          grep -E "gallium_drivers|vulkan_drivers" $TEMPLATE
+
+          ./xbps-src -a aarch64 pkg mesa
+
+          find hostdir/binpkgs -name "*.xbps" | xargs -I{} cp {} /output/
+          BUILDER
+
+          chmod +x /home/builder/xbps-build.sh
+          su builder -c /home/builder/xbps-build.sh
+          SCRIPT
+          chmod +x ${{ github.workspace }}/build.sh
 
       - name: Cross-compile Mesa for aarch64
         run: |
@@ -18,48 +62,7 @@ jobs:
             --privileged \
             -v ${{ github.workspace }}:/output \
             ghcr.io/void-linux/void-linux:latest-full-x86_64 \
-            sh -c '
-              set -e
-
-              # Update repos
-              xbps-install -Syu xbps -y
-              xbps-install -Su --ignore base-files -y || true
-
-              # Install dependencies
-              xbps-install -y git xtools base-devel sudo
-
-              # Create non-root user
-              useradd -m builder
-              echo "builder ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
-
-              git clone --depth=1 https://github.com/void-linux/void-packages.git /void-packages
-              chown -R builder:builder /void-packages
-              chown builder:builder /output
-
-              su builder -c '\''\
-                set -e
-                cd /void-packages
-
-                # Bootstrap the native environment
-                ./xbps-src binary-bootstrap
-
-                TEMPLATE=srcpkgs/mesa/template
-
-                # Patch Gallium drivers to include virpipe
-                sed -i "s/gallium_drivers=\"\([^\"]*\)\"/gallium_drivers=\"\1,virpipe\"/" $TEMPLATE
-
-                # Patch Vulkan drivers to include virtio (Venus)
-                sed -i "s/vulkan_drivers=\"\([^\"]*\)\"/vulkan_drivers=\"\1,virtio\"/" $TEMPLATE
-
-                # Verify patches
-                grep -E "gallium_drivers|vulkan_drivers" $TEMPLATE
-
-                # Cross-compile for aarch64
-                ./xbps-src -a aarch64 pkg mesa
-
-                # Copy packages to output
-                find hostdir/binpkgs -name "*.xbps" | xargs -I{} cp {} /output/
-              '\''
+            /output/build.sh
 
       - name: Upload Mesa packages
         uses: actions/upload-artifact@v4
