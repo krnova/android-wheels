@@ -36,7 +36,11 @@ jobs:
           groupadd xbuilder 2>/dev/null || true
           usermod -aG xbuilder builder
 
-          git clone --depth=1 https://github.com/void-linux/void-packages.git /void-packages || true
+          # Clone to temp, merge into /void-packages (preserves cached hostdir/masterdir)
+          git clone --depth=1 https://github.com/void-linux/void-packages.git /tmp/void-packages-src
+          cp -r /tmp/void-packages-src/. /void-packages/
+          rm -rf /tmp/void-packages-src
+
           chown -R builder:builder /void-packages
           chmod 777 /output
 
@@ -56,7 +60,6 @@ jobs:
 
           echo "=== Packages built ==="
           find hostdir/binpkgs -name "*.xbps"
-
           find hostdir/binpkgs -name "*.xbps" -exec cp {} /output/ \;
 
           echo "=== Searching for virgl_dri.so ==="
