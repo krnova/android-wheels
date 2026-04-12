@@ -38,6 +38,7 @@ jobs:
 
           git clone --depth=1 https://github.com/void-linux/void-packages.git /void-packages || true
           chown -R builder:builder /void-packages
+          chmod 777 /output
 
           cat > /home/builder/xbps-build.sh << 'BUILDER'
           #!/bin/sh
@@ -49,8 +50,6 @@ jobs:
           ./xbps-src binary-bootstrap
 
           TEMPLATE=srcpkgs/mesa/template
-
-          # Verify virgl is enabled for aarch64
           grep -E "_have_virgl|gallium_drivers|vulkan_drivers" $TEMPLATE
 
           ./xbps-src -a aarch64 pkg mesa
@@ -58,16 +57,12 @@ jobs:
           echo "=== Packages built ==="
           find hostdir/binpkgs -name "*.xbps"
 
-          # Copy all xbps packages
           find hostdir/binpkgs -name "*.xbps" -exec cp {} /output/ \;
 
-          echo "=== Searching for virgl_dri.so in destdir ==="
+          echo "=== Searching for virgl_dri.so ==="
           find masterdir/destdir -name "virgl_dri.so" 2>/dev/null || echo "NOT FOUND in destdir"
-
-          echo "=== Searching in builddir ==="
           find masterdir/builddir -name "virgl_dri.so" 2>/dev/null || echo "NOT FOUND in builddir"
 
-          # Copy .so files directly regardless of which package they ended up in
           for so in virgl_dri.so virtio_gpu_dri.so; do
             found=$(find masterdir/ -name "$so" 2>/dev/null | head -1)
             if [ -n "$found" ]; then
