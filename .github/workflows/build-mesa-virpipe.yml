@@ -1,4 +1,4 @@
-name: Build Mesa with virpipe and virtio (Void Linux aarch64)
+name: Build Mesa with virpipe (Void Linux aarch64)
 
 on:
   workflow_dispatch:
@@ -8,16 +8,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Pull native Void Linux x86_64 container
+      - name: Pull Void Linux x86_64 container
         run: docker pull ghcr.io/void-linux/void-linux:latest-full-x86_64
 
-      - name: Cache void-packages masterdir
+      - name: Cache void-packages
         uses: actions/cache@v4
         with:
           path: |
             void-packages/hostdir
             void-packages/masterdir
-          key: void-xbps-src-${{ runner.os }}-${{ hashFiles('void-packages/srcpkgs/mesa/template') }}
+          key: void-xbps-src-${{ runner.os }}-mesa
           restore-keys: |
             void-xbps-src-${{ runner.os }}-
 
@@ -27,14 +27,10 @@ jobs:
           #!/bin/sh
           set -e
 
-          # Update repos
           xbps-install -Syu xbps -y
           xbps-install -Su --ignore base-files -y || true
-
-          # Install dependencies
           xbps-install -y git xtools base-devel sudo
 
-          # Create non-root user
           useradd -m builder
           echo "builder ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
           groupadd xbuilder 2>/dev/null || true
@@ -42,7 +38,6 @@ jobs:
 
           git clone --depth=1 https://github.com/void-linux/void-packages.git /void-packages || true
           chown -R builder:builder /void-packages
-          chown builder:builder /output
 
           cat > /home/builder/xbps-build.sh << 'BUILDER'
           #!/bin/sh
@@ -55,15 +50,36 @@ jobs:
 
           TEMPLATE=srcpkgs/mesa/template
 
-          # virgl is already enabled via _have_virgl=yes for aarch64 in the template
-          # just verify it's there and add virtio vulkan
-          sed -i 's/vulkan_drivers="\([^"]*\)"/vulkan_drivers="\1,virtio"/' $TEMPLATE
-
+          # Verify virgl is enabled for aarch64
           grep -E "_have_virgl|gallium_drivers|vulkan_drivers" $TEMPLATE
 
           ./xbps-src -a aarch64 pkg mesa
 
-          find hostdir/binpkgs -name "*.xbps" | xargs -I{} cp {} /output/
+          echo "=== Packages built ==="
+          find hostdir/binpkgs -name "*.xbps"
+
+          # Copy all xbps packages
+          find hostdir/binpkgs -name "*.xbps" -exec cp {} /output/ \;
+
+          echo "=== Searching for virgl_dri.so in destdir ==="
+          find masterdir/destdir -name "virgl_dri.so" 2>/dev/null || echo "NOT FOUND in destdir"
+
+          echo "=== Searching in builddir ==="
+          find masterdir/builddir -name "virgl_dri.so" 2>/dev/null || echo "NOT FOUND in builddir"
+
+          # Copy .so files directly regardless of which package they ended up in
+          for so in virgl_dri.so virtio_gpu_dri.so; do
+            found=$(find masterdir/ -name "$so" 2>/dev/null | head -1)
+            if [ -n "$found" ]; then
+              echo "Found $so at $found"
+              cp "$found" /output/
+            else
+              echo "WARNING: $so not found anywhere"
+            fi
+          done
+
+          echo "=== Final /output contents ==="
+          ls -lh /output/
           BUILDER
 
           chmod +x /home/builder/xbps-build.sh
@@ -71,17 +87,25 @@ jobs:
           SCRIPT
           chmod +x ${{ github.workspace }}/build.sh
 
-      - name: Cross-compile Mesa for aarch64
+      - name: Build Mesa for aarch64
         run: |
           docker run --rm \
             --privileged \
             -v ${{ github.workspace }}:/output \
+            -v ${{ github.workspace }}/void-packages:/void-packages \
             ghcr.io/void-linux/void-linux:latest-full-x86_64 \
             /output/build.sh
+
+      - name: List output
+        run: ls -lh ${{ github.workspace }}/
 
       - name: Upload Mesa packages
         uses: actions/upload-artifact@v4
         with:
           name: mesa-virpipe-aarch64
-          path: "*.xbps"
+          path: |
+            ${{ github.workspace }}/*.xbps
+            ${{ github.workspace }}/virgl_dri.so
+            ${{ github.workspace }}/virtio_gpu_dri.so
+          if-no-files-found: warn
           retention-days: 7
